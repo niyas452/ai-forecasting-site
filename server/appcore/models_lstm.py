@@ -1,69 +1,191 @@
+import os
+import random
+import zlib
 import numpy as np
 import pandas as pd
+
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, TensorDataset
+from sklearn.preprocessing import StandardScaler
+
+
+def _slice_X_for_ticker(X: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    suffix = f"_{ticker}"
+    cols = [c for c in X.columns if c.endswith(suffix)]
+    return X[cols].copy()
+
+
+class _LSTMReg(nn.Module):
+    def __init__(self, n_features: int, hidden: int = 64, dropout: float = 0.0):
+        super().__init__()
+        self.lstm = nn.LSTM(input_size=n_features, hidden_size=hidden, batch_first=True)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        self.fc = nn.Linear(hidden, 1)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        last = out[:, -1, :]
+        last = self.dropout(last)
+        return self.fc(last).squeeze(-1)
 
 
 class LSTMModel:
-    """A lightweight LSTM regressor for forecasting."""
+    
 
-    def __init__(self, seq_len=36, epochs=50, lr=1e-3, device=None):
+    def __init__(
+        self,
+        seq_len: int = 24,
+        epochs: int = 30,
+        lr: float = 1e-3,
+        batch_size: int = 32,
+        device=None,
+        seed: int = 42,
+        hidden: int = 64,
+        dropout: float = 0.0,
+        deterministic: bool = True,
+    ):
         self.seq_len = seq_len
         self.epochs = epochs
         self.lr = lr
+        self.batch_size = batch_size
+        self.seed = int(seed)
+        self.hidden = hidden
+        self.dropout = dropout
+        self.deterministic = deterministic
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self.model = None
 
-    def _build_model(self, input_dim):
-        model = nn.Sequential(
-            nn.LSTM(input_dim, 64, batch_first=True),
-            nn.ReLU(),
-            nn.Linear(64, 1),
-        )
-        return model
+        self.models: dict[str, _LSTMReg] = {}
+        self.scalers: dict[str, StandardScaler] = {}
+        self.tickers: list[str] | None = None
+
+    def _set_global_deterministic(self):
+        # global deterministic config (once)
+        os.environ["PYTHONHASHSEED"] = str(self.seed)
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        try:
+            torch.use_deterministic_algorithms(True)
+        except Exception:
+            # if this errors on your setup, it's okay to continue
+            pass
+
+    def _seed_for_ticker(self, ticker: str) -> int:
+        # stable hash across runs (unlike Python's hash())
+        h = zlib.crc32(ticker.encode("utf-8")) & 0xFFFFFFFF
+        return (self.seed + int(h)) % (2**31 - 1)
+
+    def _reseed_all(self, seed: int):
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
     def fit(self, X: pd.DataFrame, y: pd.DataFrame):
-        y_med = y.median(axis=1)
-        common = X.index.intersection(y_med.index)
-        X_arr = X.loc[common].values.astype(np.float32)
-        y_arr = y_med.loc[common].values.astype(np.float32)
+        if self.deterministic:
+            self._set_global_deterministic()
 
-        # Reshape for LSTM (samples, seq_len, features)
-        X_tensor = torch.tensor(X_arr).unsqueeze(1)
-        y_tensor = torch.tensor(y_arr).unsqueeze(1)
+        self.tickers = list(y.columns)
+        self.models.clear()
+        self.scalers.clear()
 
-        dataset = TensorDataset(X_tensor, y_tensor)
-        loader = DataLoader(dataset, batch_size=32, shuffle=True)
+        for t in self.tickers:
+            # ✅ reseed per ticker so training order / other tickers don't affect this ticker
+            t_seed = self._seed_for_ticker(t)
+            self._reseed_all(t_seed)
 
-        input_dim = X_tensor.shape[-1]
-        self.model = self._build_model(input_dim).to(self.device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
-        criterion = nn.MSELoss()
+            Xt = _slice_X_for_ticker(X, t)
+            yt = y[t]
 
-        for _ in range(self.epochs):
-            for xb, yb in loader:
-                xb, yb = xb.to(self.device), yb.to(self.device)
-                optimizer.zero_grad()
-                pred, _ = self.model[0](xb)
-                out = self.model[2](torch.relu(pred[:, -1, :]))
-                loss = criterion(out.squeeze(), yb.squeeze())
-                loss.backward()
-                optimizer.step()
+            # align + drop NaNs per ticker
+            df = Xt.join(yt.rename("y"), how="inner")
+            df = df.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+            if df.empty or len(df) <= self.seq_len + 1:
+                continue
+
+            Xt2 = df.drop(columns=["y"])
+            yt2 = df["y"]
+
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(Xt2.values.astype(np.float32))
+            y_arr = yt2.values.astype(np.float32)
+
+            X_seq, y_seq = [], []
+            for i in range(self.seq_len, len(X_scaled)):
+                X_seq.append(X_scaled[i - self.seq_len : i, :])
+                y_seq.append(y_arr[i])
+
+            X_seq = np.asarray(X_seq, dtype=np.float32)
+            y_seq = np.asarray(y_seq, dtype=np.float32)
+
+            ds = TensorDataset(torch.tensor(X_seq), torch.tensor(y_seq))
+
+            # ✅ generator seeded per ticker (shuffle reproducible per ticker)
+            g = torch.Generator()
+            g.manual_seed(t_seed)
+
+            dl = DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=True,
+                generator=g,
+                num_workers=0,
+                pin_memory=False,
+            )
+
+            model = _LSTMReg(
+                n_features=X_seq.shape[-1],
+                hidden=self.hidden,
+                dropout=self.dropout,
+            ).to(self.device)
+
+            opt = torch.optim.Adam(model.parameters(), lr=self.lr)
+            loss_fn = nn.MSELoss()
+
+            model.train()
+            for _ in range(self.epochs):
+                for xb, yb in dl:
+                    xb = xb.to(self.device)
+                    yb = yb.to(self.device)
+                    opt.zero_grad(set_to_none=True)
+                    pred = model(xb)
+                    loss = loss_fn(pred, yb)
+                    loss.backward()
+                    opt.step()
+
+            self.models[t] = model
+            self.scalers[t] = scaler
 
         return self
 
     def predict(self, X: pd.DataFrame) -> pd.Series:
-        if self.model is None:
-            raise RuntimeError("Model not fitted yet")
+        if self.tickers is None:
+            raise RuntimeError("LSTMModel must be fit before predict().")
 
-        self.model.eval()
-        X_tensor = torch.tensor(X.values.astype(np.float32)).unsqueeze(1).to(self.device)
-        with torch.no_grad():
-            pred, _ = self.model[0](X_tensor)
-            out = self.model[2](torch.relu(pred[:, -1, :]))
-            preds = out.cpu().numpy().flatten()
+        out: dict[str, float] = {}
+        for t in self.tickers:
+            model = self.models.get(t)
+            scaler = self.scalers.get(t)
 
-        tickers = [c.split("_")[-1] for c in X.columns]
-        last = preds[-1] if len(preds) else np.nan
-        return pd.Series({t: float(last) for t in tickers})
+            if model is None or scaler is None:
+                out[t] = float("nan")
+                continue
+
+            Xt = _slice_X_for_ticker(X, t)
+            Xt2 = Xt.replace([np.inf, -np.inf], np.nan).dropna(how="any")
+            if len(Xt2) < self.seq_len:
+                out[t] = float("nan")
+                continue
+
+            X_scaled = scaler.transform(Xt2.values.astype(np.float32))
+            last_seq = X_scaled[-self.seq_len :, :]
+            xb = torch.tensor(last_seq[None, :, :], dtype=torch.float32).to(self.device)
+
+            model.eval()
+            with torch.no_grad():
+                out[t] = float(model(xb).item())
+
+        return pd.Series(out)
+
