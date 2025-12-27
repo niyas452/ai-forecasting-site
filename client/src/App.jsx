@@ -11,11 +11,111 @@ import {
   Pie,
   Cell,
   Legend,
+  LineChart,
+  Line,
+  CartesianGrid,
+  ReferenceDot,
 } from "recharts";
 
 const API_BASE = "http://127.0.0.1:8000";
 
 const COLORS = ["#6366f1", "#22c55e", "#f97316", "#ec4899", "#06b6d4"];
+
+/** --- date helpers: YYYY-MM arithmetic --- */
+const ymToIndex = (ym) => {
+  const [y, m] = ym.split("-").map(Number);
+  return y * 12 + (m - 1);
+};
+
+const indexToYM = (idx) => {
+  const y = Math.floor(idx / 12);
+  const m = (idx % 12) + 1;
+  return `${y}-${String(m).padStart(2, "0")}`;
+};
+
+/**
+ * Build the exact 5 points you asked for:
+ * 6m horizon:  -18m, -12m, -6m, now, forecast(+6m)
+ * 12m horizon: -36m, -24m, -12m, now, forecast(+12m)
+ *
+ * It uses forecastItem.chart_series (monthly actual points + 1 forecast point).
+ */
+const buildFivePointSeries = (forecastItem, horizon) => {
+  const series = Array.isArray(forecastItem?.chart_series)
+    ? forecastItem.chart_series
+    : [];
+  if (series.length === 0) return [];
+
+  const actual = series.filter((p) => p.kind === "actual");
+  const forecast = series.find((p) => p.kind === "forecast") || null;
+
+  if (actual.length === 0) return [];
+
+  const lastActual = actual[actual.length - 1]; // now/current month-end
+  const nowYM = lastActual.date;
+  const nowIdx = ymToIndex(nowYM);
+
+  const step = horizon === "12m" ? 12 : 6;
+  const offsets = [-3 * step, -2 * step, -1 * step, 0]; // 4 historical incl now
+  const targetIdx = offsets.map((o) => nowIdx + o);
+
+  // map actual date -> price
+  const actualMap = new Map(actual.map((p) => [p.date, p.price]));
+
+  // If exact month missing, pick nearest available actual month (closest by idx)
+  const findNearestActualYM = (wantedIdx) => {
+    let best = actual[0]?.date;
+    let bestDist = Infinity;
+    for (const p of actual) {
+      const d = Math.abs(ymToIndex(p.date) - wantedIdx);
+      if (d < bestDist) {
+        bestDist = d;
+        best = p.date;
+      }
+    }
+    return best;
+  };
+
+  const points = targetIdx.map((idx) => {
+    const ym = indexToYM(idx);
+    const exact = actualMap.get(ym);
+    if (exact != null) {
+      return { date: ym, price: exact, kind: "actual" };
+    }
+    const nearestYM = findNearestActualYM(idx);
+    return {
+      date: nearestYM,
+      price: actualMap.get(nearestYM),
+      kind: "actual",
+    };
+  });
+
+  // ensure unique dates in case nearest selection duplicates
+  const unique = [];
+  const seen = new Set();
+  for (const p of points) {
+    if (!seen.has(p.date)) {
+      seen.add(p.date);
+      unique.push(p);
+    }
+  }
+
+  // add forecast point (final point)
+  if (forecast && forecast.price != null && forecast.date) {
+    unique.push({ date: forecast.date, price: forecast.price, kind: "forecast" });
+  }
+
+  return unique;
+};
+
+// ✅ Updated: treat null/NaN and 0/-0 as "N/A" for intervals
+const fmtInterval = (v) => {
+  if (v === null || v === undefined) return "N/A";
+  const n = Number(v);
+  if (!Number.isFinite(n)) return "N/A";
+  if (Math.abs(n) < 1e-6) return "N/A"; // hide 0.0000 / -0.0000
+  return n.toFixed(4);
+};
 
 function App() {
   const [tickersInput, setTickersInput] = useState("AAPL,MSFT,SPY");
@@ -27,9 +127,9 @@ function App() {
   const [forecastError, setForecastError] = useState("");
   const [optError, setOptError] = useState("");
 
-  const [forecasts, setForecasts] = useState([]); // [{ticker, p10, p50, p90, horizon, spot, price_p50}]
-  const [weights, setWeights] = useState(null); // { ticker: weight, ... }
-  const [mu, setMu] = useState(null); // { ticker: expected_return, ... }
+  const [forecasts, setForecasts] = useState([]); // includes chart_series now
+  const [weights, setWeights] = useState(null);
+  const [mu, setMu] = useState(null);
 
   const cleanTickers = () =>
     tickersInput
@@ -43,7 +143,7 @@ function App() {
     setForecastError("");
     setOptError("");
     setForecastLoading(true);
-    setWeights(null); // clear old optimization
+    setWeights(null);
 
     const tickersList = cleanTickers();
     if (tickersList.length === 0) {
@@ -60,7 +160,6 @@ function App() {
 
       const res = await axios.get(`${API_BASE}/forecast?${params}`);
       const data = res.data?.forecasts || [];
-
       setForecasts(data);
     } catch (err) {
       console.error(err);
@@ -105,14 +204,12 @@ function App() {
 
   // --------- derived data for charts ---------
 
-  // Bar chart: current vs expected price
   const forecastChartData = forecasts.map((f) => ({
     ticker: f.ticker,
     spot: f.spot ?? null,
     expected: f.price_p50 ?? null,
   }));
 
-  // Pie chart + table for weights
   const weightsChartData =
     weights &&
     Object.entries(weights).map(([ticker, w]) => ({
@@ -127,6 +224,24 @@ function App() {
       weight: w,
       mu: mu && mu[ticker] != null ? mu[ticker] : null,
     }));
+
+  // ✅ NEW: five-point line series for each ticker
+  const fivePointSeriesByTicker = forecasts.map((f) => ({
+    ticker: f.ticker,
+    series: buildFivePointSeries(f, horizon),
+  }));
+
+  // ✅ Updated dot: NO forecast dot here (ReferenceDot will draw it)
+  const CustomDot = (props) => {
+    const { cx, cy, payload } = props;
+    if (!payload) return null;
+
+    // ❌ don't draw forecast dot on the line (prevents the extra top-corner red dot)
+    if (payload.kind === "forecast") return null;
+
+    // blue dot for actual points
+    return <circle cx={cx} cy={cy} r={3} fill="#38bdf8" />;
+  };
 
   // --------- UI ---------
 
@@ -177,7 +292,6 @@ function App() {
               optimize portfolio weights.
             </p>
           </div>
-          {/* Badge removed as requested */}
         </header>
 
         {/* INPUT CARD */}
@@ -226,7 +340,13 @@ function App() {
                 alignItems: "center",
               }}
             >
-              <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "4px",
+                }}
+              >
                 <label style={{ fontSize: "13px", color: "#9ca3af" }}>
                   Forecast Horizon
                 </label>
@@ -270,7 +390,13 @@ function App() {
               gap: "12px",
             }}
           >
-            <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "10px",
+              }}
+            >
               <button
                 onClick={handleForecast}
                 disabled={forecastLoading}
@@ -337,8 +463,8 @@ function App() {
                 paddingTop: "8px",
               }}
             >
-              Backend: FastAPI · Models: ElasticNet, LightGBM, LSTM · Optimization: max
-              Sharpe using Ledoit–Wolf covariance.
+              Backend: FastAPI · Models: ElasticNet, LightGBM, LSTM · Optimization:
+              max Sharpe using Ledoit–Wolf covariance.
             </div>
           </div>
         </section>
@@ -375,13 +501,7 @@ function App() {
             </div>
 
             {forecasts.length === 0 ? (
-              <p
-                style={{
-                  fontSize: "13px",
-                  color: "#6b7280",
-                  marginTop: "4px",
-                }}
-              >
+              <p style={{ fontSize: "13px", color: "#6b7280", marginTop: "4px" }}>
                 Run a forecast to see model outputs for each ticker.
               </p>
             ) : (
@@ -439,9 +559,7 @@ function App() {
                   {forecasts.map((f) => (
                     <tr
                       key={f.ticker}
-                      style={{
-                        borderBottom: "1px solid #020617",
-                      }}
+                      style={{ borderBottom: "1px solid #020617" }}
                     >
                       <td style={{ padding: "6px 4px", fontWeight: 600 }}>
                         {f.ticker}
@@ -458,6 +576,7 @@ function App() {
                       <td style={{ padding: "6px 4px", textAlign: "right" }}>
                         {f.p50 != null ? f.p50.toFixed(4) : "—"}
                       </td>
+                      {/* ✅ Updated formatting for XAU zeros */}
                       <td
                         style={{
                           padding: "6px 4px",
@@ -465,7 +584,7 @@ function App() {
                           color: "#f97373",
                         }}
                       >
-                        {f.p10 != null ? f.p10.toFixed(4) : "N/A"}
+                        {fmtInterval(f.p10)}
                       </td>
                       <td
                         style={{
@@ -474,7 +593,7 @@ function App() {
                           color: "#4ade80",
                         }}
                       >
-                        {f.p90 != null ? f.p90.toFixed(4) : "N/A"}
+                        {fmtInterval(f.p90)}
                       </td>
                     </tr>
                   ))}
@@ -483,7 +602,7 @@ function App() {
             )}
           </div>
 
-          {/* Charts card */}
+          {/* Visuals card (ONLY bar chart now) */}
           <div
             style={{
               background: "rgba(15,23,42,0.95)",
@@ -497,7 +616,6 @@ function App() {
           >
             <h2 style={{ fontSize: "16px", fontWeight: 600 }}>Visuals</h2>
 
-            {/* Forecast bar chart */}
             <div style={{ height: "260px" }}>
               <p
                 style={{
@@ -532,14 +650,10 @@ function App() {
                       }}
                       formatter={(value) => [
                         value?.toFixed ? value.toFixed(2) : value,
-                        
                       ]}
                     />
                     <Legend
-                      wrapperStyle={{
-                        fontSize: "11px",
-                        color: "#e5e7eb",
-                      }}
+                      wrapperStyle={{ fontSize: "11px", color: "#e5e7eb" }}
                     />
                     <Bar dataKey="spot" name="Current price" fill="#38bdf8" />
                     <Bar
@@ -554,7 +668,157 @@ function App() {
           </div>
         </section>
 
-        {/* PORTFOLIO SECTION (NEW, FULL WIDTH) */}
+        {/* ✅ NEW SECTION: 5-point line charts for EVERY ticker (before portfolio) */}
+        <section
+          style={{
+            marginTop: "4px",
+            background: "rgba(255,255,255,0.03)",
+            borderRadius: "18px",
+            padding: "20px",
+            border: "1px solid rgba(255,255,255,0.1)",
+            backdropFilter: "blur(6px)",
+          }}
+        >
+          <h2 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "10px" }}>
+            Price Path (5 points)
+          </h2>
+          <p style={{ fontSize: "12px", color: "#9ca3af", marginBottom: "14px" }}>
+            {horizon === "6m"
+              ? "Points are spaced by 6 months (past 18m → now → forecast)."
+              : "Points are spaced by 12 months (past 36m → now → forecast)."}{" "}
+            Forecast point is highlighted in red.
+          </p>
+
+          {forecasts.length === 0 ? (
+            <p style={{ fontSize: "13px", color: "#6b7280" }}>
+              Run forecast to display line charts.
+            </p>
+          ) : (
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))",
+                gap: "16px",
+              }}
+            >
+              {fivePointSeriesByTicker.map(({ ticker, series }) => {
+                const forecastPoint = series.find((p) => p.kind === "forecast");
+
+                const lastActualIdx = (() => {
+                  for (let i = series.length - 1; i >= 0; i--) {
+                    if (series[i]?.kind === "actual") return i;
+                  }
+                  return -1;
+                })();
+
+                const chartData = series.map((p, i) => ({
+                  date: p.date,
+                  kind: p.kind,
+                  actual: p.kind === "actual" ? p.price : null,
+                  connector:
+                    i === lastActualIdx || p.kind === "forecast" ? p.price : null,
+                }));
+
+                return (
+                  <div
+                    key={ticker}
+                    style={{
+                      background: "rgba(15,23,42,0.9)",
+                      borderRadius: "14px",
+                      padding: "12px 14px",
+                      border: "1px solid rgba(30,64,175,0.35)",
+                    }}
+                  >
+                    <div
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        marginBottom: "6px",
+                      }}
+                    >
+                      <div style={{ fontWeight: 700 }}>{ticker}</div>
+                      <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+                        {horizon}
+                      </div>
+                    </div>
+
+                    <div style={{ height: "220px" }}>
+                      {series.length === 0 ? (
+                        <p style={{ fontSize: "12px", color: "#6b7280" }}>
+                          No chart data available.
+                        </p>
+                      ) : (
+                        <ResponsiveContainer width="100%" height="100%">
+                          <LineChart data={chartData}>
+                            <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
+                            <XAxis
+                              dataKey="date"
+                              tick={{ fill: "#9ca3af", fontSize: 11 }}
+                            />
+                            <YAxis
+                              tick={{ fill: "#9ca3af", fontSize: 11 }}
+                              tickFormatter={(v) => Number(v).toFixed(0)}
+                              domain={["auto", "auto"]}
+                            />
+                            <Tooltip
+                              contentStyle={{
+                                background: "#020617",
+                                border: "1px solid #374151",
+                                borderRadius: "10px",
+                                fontSize: "12px",
+                              }}
+                              formatter={(value, name, props) => {
+                                const kind = props?.payload?.kind;
+                                const label =
+                                  kind === "forecast" ? "Forecast" : "Actual";
+                                return [Number(value).toFixed(2), label];
+                              }}
+                            />
+
+                            {/* Blue history with dots only for actual */}
+                            <Line
+                              type="monotone"
+                              dataKey="actual"
+                              stroke="#38bdf8"
+                              strokeWidth={2}
+                              dot={<CustomDot />}
+                              activeDot={{ r: 5 }}
+                            />
+
+                            {/* Green connector current -> forecast */}
+                            <Line
+                              type="monotone"
+                              dataKey="connector"
+                              stroke="#22c55e"
+                              strokeWidth={2.5}
+                              dot={false}
+                              activeDot={false}
+                            />
+
+                            {/* ✅ Keep forecast dot at expected point */}
+                            {forecastPoint && (
+                              <ReferenceDot
+                                x={forecastPoint.date}
+                                y={forecastPoint.price}
+                                r={7}
+                                fill="#ef4444"
+                                stroke="#ffffff"
+                                strokeWidth={1}
+                                isFront
+                              />
+                            )}
+                          </LineChart>
+                        </ResponsiveContainer>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* PORTFOLIO SECTION (unchanged) */}
         <section
           style={{
             marginTop: "20px",
@@ -665,3 +929,4 @@ function App() {
 }
 
 export default App;
+
