@@ -1,13 +1,22 @@
+# app.py
 import os
 import sys
 import json
 import re
 import math
+import time
+from typing import Optional, Dict, Tuple, List, Literal
 
+import numpy as np
+import pandas as pd
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import pandas as pd
+
+# ---------- path bootstrap ----------
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+if BASE_DIR not in sys.path:
+    sys.path.insert(0, BASE_DIR)
 
 from appcore.data import load_prices
 from appcore.features import make_monthly_features, targets
@@ -15,21 +24,30 @@ from appcore.models_linear import ElasticNetModel
 from appcore.models_lgb import LGBMQuantile
 from appcore.models_lstm import LSTMModel
 from appcore.ensemble import PerformanceWeightedEnsemble
-from appcore.conformal import ConformalBands
 from appcore.risk import ledoit_wolf_cov
-from appcore.optimize import max_sharpe
+from appcore.optimize import max_sharpe_long_only
 from appcore.utils import to_monthly
 
-# ---------- path bootstrap ----------
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-if BASE_DIR not in sys.path:
-    sys.path.insert(0, BASE_DIR)
+
+# ---------- caching (stops re-downloading every call) ----------
+CACHE_TTL_SECONDS = 900  # 15 minutes
+_PRICE_CACHE: Dict[Tuple[str, ...], tuple[float, pd.DataFrame]] = {}
+
+
+def load_prices_cached(tickers: list[str], start: str = "2005-01-01") -> pd.DataFrame:
+    key = tuple(sorted([t.upper() for t in tickers]))
+    now = time.time()
+    if key in _PRICE_CACHE:
+        ts, df = _PRICE_CACHE[key]
+        if (now - ts) < CACHE_TTL_SECONDS and df is not None and not df.empty:
+            return df
+    df = load_prices(list(key), start=start)
+    _PRICE_CACHE[key] = (now, df)
+    return df
 
 
 # ---------- helpers ----------
-
-def safe_float(x):
-    """Convert to a normal finite float or return None."""
+def safe_float(x) -> Optional[float]:
     if x is None:
         return None
     try:
@@ -41,221 +59,274 @@ def safe_float(x):
     return v
 
 
+def last_price_for_ticker(prices: pd.DataFrame, t: str) -> Optional[float]:
+    """
+    ✅ IMPORTANT:
+    Use the last available price PER ticker (not prices.iloc[-1]).
+    This makes 'spot' stable even when other tickers have missing last rows.
+    """
+    if prices is None or prices.empty or t not in prices.columns:
+        return None
+    s = prices[t].replace([np.inf, -np.inf], np.nan).dropna()
+    return safe_float(s.iloc[-1]) if not s.empty else None
+
+
 def parse_tickers(raw: str) -> list[str]:
     """
     Accepts either 'AAPL,MSFT,SPY' or '["AAPL","MSFT","SPY"]'
     and returns ['AAPL','MSFT','SPY'].
-    Also strips stray quotes/brackets/spaces.
     """
     cleaned = raw.strip()
-    # Try JSON array first
     try:
         obj = json.loads(cleaned)
-        if isinstance(obj, list):
-            cands = obj
-        else:
-            cands = [cleaned]
+        cands = obj if isinstance(obj, list) else [cleaned]
     except Exception:
-        # Fallback to CSV / whitespace split
         cands = re.split(r"[,\s]+", cleaned)
 
     out: list[str] = []
     for t in cands:
-        t = str(t).strip().upper()
-        t = t.strip(' "\'[]')
+        t = str(t).strip().upper().strip(' "\'[]')
         if t:
             out.append(t)
-    return out
+
+    # dedupe preserve order
+    seen = set()
+    deduped = []
+    for t in out:
+        if t not in seen:
+            seen.add(t)
+            deduped.append(t)
+    return deduped
 
 
-# ---------- app + schemas ----------
+def weights_to_pct_100(w: pd.Series, decimals: int = 1) -> pd.Series:
+    """
+    Convert weights (sum ~1) to % labels that sum to exactly 100.0 after rounding.
+    """
+    if w is None or w.empty:
+        return pd.Series(dtype=float)
 
-app = FastAPI(title="AI Ensemble Forecasting API", version="0.1.0")
+    pct = (w * 100.0).copy()
+    factor = 10**decimals
+    pct_rounded = (pct * factor).round() / factor
+    diff = 100.0 - float(pct_rounded.sum())
+    last_key = pct_rounded.index[-1]
+    pct_rounded.loc[last_key] = float((pct_rounded.loc[last_key] + diff) * factor) / factor
+    return pct_rounded
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],   # allow GET, POST, OPTIONS, etc.
-    allow_headers=["*"],
-)
+
+def make_chart_series(
+    prices: pd.DataFrame,
+    ticker: str,
+    horizon: str,
+    forecast_price: Optional[float],
+) -> list[dict]:
+    """
+    6m: show last 18 months (3x6m) + current + forecast point at +6m
+    12m: show last 36 months (3y) + current + forecast point at +12m
+
+    Returns list of:
+      {"date":"YYYY-MM", "price": float, "kind": "actual"|"forecast"}
+    """
+    m = to_monthly(prices)
+    if ticker not in m.columns:
+        return []
+
+    if horizon == "6m":
+        hist_months = 18
+        future_months = 6
+    else:
+        hist_months = 36
+        future_months = 12
+
+    s = m[ticker].dropna()
+    if s.empty:
+        return []
+
+    s_hist = s.iloc[-(hist_months + 1):]
+
+    pts: list[dict] = []
+    for dt, val in s_hist.items():
+        pts.append({"date": dt.strftime("%Y-%m"), "price": float(val), "kind": "actual"})
+
+    if forecast_price is not None and len(pts) > 0:
+        last_dt = s_hist.index[-1]
+        future_dt = last_dt + pd.DateOffset(months=future_months)
+        pts.append({"date": future_dt.strftime("%Y-%m"), "price": float(forecast_price), "kind": "forecast"})
+
+    return pts
+
+
+# ---------- API models ----------
+class ChartPoint(BaseModel):
+    date: str
+    price: float
+    kind: Literal["actual", "forecast"]
 
 
 class ForecastResponse(BaseModel):
     ticker: str
     horizon: str
-    p10: float | None = None
+    p10: Optional[float] = None
     p50: float
-    p90: float | None = None
-    spot: float | None = None          # current price
-    price_p50: float | None = None     # expected price at horizon (from p50)
+    p90: Optional[float] = None
+    spot: Optional[float] = None
+    price_p50: Optional[float] = None
+    chart_series: List[ChartPoint] = []
 
 
 class OptimizeRequest(BaseModel):
     horizon: str = "6m"
     tickers: list[str]
+    max_weight: float = 0.60
 
 
-# optional nice root
+# ---------- app ----------
+app = FastAPI(title="AI Ensemble Forecasting API", version="0.6.2")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "endpoints": ["/forecast", "/optimize", "/docs"]}
 
 
-# ---------- endpoints ----------
+# ---------- model fitting ----------
+def fit_models_for_forecast(X: pd.DataFrame, y: pd.DataFrame):
+    enet = ElasticNetModel().fit(X, y)
 
+    qgbm = None
+    try:
+        qgbm = LGBMQuantile().fit(X, y)
+    except Exception as e:
+        print(f"[WARN] Quantile model failed: {e}")
+
+    lstm = None
+    try:
+        lstm = LSTMModel(seq_len=24, epochs=20).fit(X, y)
+    except Exception as e:
+        print(f"[WARN] LSTM failed: {e}")
+
+    ens = PerformanceWeightedEnsemble().set_models(
+        ElasticNet=enet,
+        QuantileGBM=qgbm,
+        LSTM=lstm,
+    )
+    return enet, qgbm, ens
+
+
+# ---------- endpoints ----------
 @app.get("/forecast")
 def forecast(
     tickers: str = Query(..., description="Comma-separated tickers or JSON list"),
     horizon: str = Query("6m", enum=["6m", "12m"]),
 ):
-    # parse input tickers
     tickers_list = parse_tickers(tickers)
 
-    # download prices
-    prices = load_prices(tickers_list)
+    prices = load_prices_cached(tickers_list)
     if prices is None or prices.empty:
-        raise HTTPException(
-            status_code=502,
-            detail="Could not download any price data from Yahoo Finance. "
-                   "Try again or change tickers.",
-        )
+        raise HTTPException(502, "Could not download any price data from Yahoo Finance.")
 
-    # build features/targets
     try:
         X = make_monthly_features(prices)
         y = targets(prices, horizon)
-    except (ValueError, TypeError) as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Data error while building features: {e}",
-        )
-
-        # ----- MODELS (deterministic: ElasticNet only for stable outputs) -----
-    enet = ElasticNetModel().fit(X, y)
-
-    # Directly use ElasticNet predictions as our median forecast (p50)
-    p50_series = enet.predict(X)  # Series indexed by ticker
-
-
-    # --- Conformal interval using last ~24 months residuals (safe) ---
-    try:
-        # Only use dates that exist in BOTH X and y
-        val_idx = X.index.intersection(y.index)
-        if val_idx.empty:
-            raise ValueError("No overlapping dates between X and y for conformal.")
-
-        # Take up to the last 24 dates
-        if len(val_idx) > 24:
-            val_idx = val_idx[-24:]
-
-        # True values stacked as (date, ticker)
-        y_val = y.loc[val_idx].stack()
-
-        # Use the SAME feature matrix the model saw at training
-        y_hat_matrix = enet.model.predict(X.loc[val_idx])  # (n_samples, n_tickers)
-
-        # Wrap into DataFrame with same columns (tickers)
-        y_hat_df = pd.DataFrame(y_hat_matrix, index=val_idx, columns=y.columns)
-
-        # Stack to align with y_val
-        y_hat_val = y_hat_df.stack()
-
-        conformal = ConformalBands(alpha=0.1).fit(y_val, y_hat_val)
-        p10_series, _, p90_series = conformal.predict_interval(p50_series)
     except Exception as e:
-        print(f"[WARN] conformal interval failed: {e}")
-        # fallback: treat as "no interval"
-        p10_series = pd.Series(index=p50_series.index, dtype=float)
-        p90_series = pd.Series(index=p50_series.index, dtype=float)
+        raise HTTPException(502, f"Data error while building features: {e}")
 
-    # last available prices per ticker
-    last_prices = prices.iloc[-1]
+    enet, qgbm, ens = fit_models_for_forecast(X, y)
 
-    out: list[ForecastResponse] = []
+    # Ensemble p50 (expected log-return over horizon)
+    p50_series = ens.predict(X).reindex(tickers_list)
+
+    # Intervals: prefer quantiles if available, else N/A
+    p10_series = pd.Series(index=p50_series.index, dtype=float)
+    p90_series = pd.Series(index=p50_series.index, dtype=float)
+
+    if qgbm is not None:
+        try:
+            p10_q, p50_q, p90_q = qgbm.predict_quantiles(X)
+            p10_series = p10_q.reindex(p50_series.index)
+            p90_series = p90_q.reindex(p50_series.index)
+            p50_series = p50_series.fillna(p50_q.reindex(p50_series.index))
+        except Exception as e:
+            print(f"[WARN] Quantile prediction failed: {e}")
+
+    out: list[dict] = []
     for t in tickers_list:
-        # current price
-        spot_val = (
-            safe_float(last_prices.get(t)) if t in last_prices.index else None
-        )
+        # ✅ stable spot per ticker
+        spot_val = last_price_for_ticker(prices, t)
 
-        # median log-return
         p50_val = safe_float(p50_series.get(t))
-
-        # conformal bounds (may be None)
-        p10_val = None
-        p90_val = None
-        if isinstance(p10_series, pd.Series) and t in p10_series.index:
-            p10_val = safe_float(p10_series[t])
-        if isinstance(p90_series, pd.Series) and t in p90_series.index:
-            p90_val = safe_float(p90_series[t])
+        p10_val = safe_float(p10_series.get(t))
+        p90_val = safe_float(p90_series.get(t))
 
         # expected future price from log-return: S_T = S_0 * exp(p50)
         price_p50_val = None
         if spot_val is not None and p50_val is not None:
             price_p50_val = safe_float(spot_val * math.exp(p50_val))
 
-        out.append(
-            ForecastResponse(
-                ticker=t,
-                horizon=horizon,
-                p10=p10_val,
-                p50=p50_val if p50_val is not None else 0.0,
-                p90=p90_val,
-                spot=spot_val,
-                price_p50=price_p50_val,
-            )
-        )
+        chart_series = make_chart_series(prices, t, horizon, price_p50_val)
 
-    return {"forecasts": [o.dict() for o in out]}
+        item = ForecastResponse(
+            ticker=t,
+            horizon=horizon,
+            p10=p10_val,
+            p50=p50_val if p50_val is not None else 0.0,
+            p90=p90_val,
+            spot=spot_val,
+            price_p50=price_p50_val,
+            chart_series=chart_series,
+        ).dict()
+
+        out.append(item)
+
+    return {"forecasts": out}
 
 
 @app.post("/optimize")
 def optimize(req: OptimizeRequest):
-    # normalize tickers: ensure upper-case symbols
     tickers_list = [t.upper() for t in req.tickers]
 
-    # download prices
-    prices = load_prices(tickers_list)
+    prices = load_prices_cached(tickers_list)
     if prices is None or prices.empty:
-        raise HTTPException(
-            status_code=502,
-            detail="Could not download any price data from Yahoo Finance for optimization.",
-        )
+        raise HTTPException(502, "Could not download any price data from Yahoo Finance for optimization.")
 
-    # features/targets
     try:
         X = make_monthly_features(prices)
         y = targets(prices, req.horizon)
-    except (ValueError, TypeError) as e:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Data error while building features: {e}",
-        )
+    except Exception as e:
+        raise HTTPException(502, f"Data error while building features: {e}")
 
-        # ----- MODELS (deterministic ElasticNet only) -----
+    # FAST μ for optimization
     enet = ElasticNetModel().fit(X, y)
+    mu_log = enet.predict(X).reindex(tickers_list)
 
-    # Use ElasticNet predictions as expected log-returns μ
-    mu = enet.predict(X)  # expected log-return (median) per ticker
-
-
-    # risk: Ledoit–Wolf covariance on monthly returns
+    # Ledoit–Wolf covariance on historical LOG returns
     m = to_monthly(prices)
-    rets = m.pct_change().dropna()
-    cov = ledoit_wolf_cov(rets)
+    rets_log = np.log(m / m.shift(1)).dropna(how="any")
+    cov = ledoit_wolf_cov(rets_log)
 
-    # align and optimize
-    common = mu.index.intersection(cov.index)
+    common = mu_log.index.intersection(cov.index)
     if common.empty:
-        raise HTTPException(
-            status_code=500,
-            detail="No overlapping tickers between forecast and covariance matrix.",
-        )
+        raise HTTPException(500, "No overlapping tickers between forecast and covariance matrix.")
 
-    w = max_sharpe(mu.loc[common], cov.loc[common, common])
+    mu2 = mu_log.loc[common]
+    cov2 = cov.loc[common, common]
 
-    return {"weights": w.to_dict(), "mu": mu.to_dict()}
+    w = max_sharpe_long_only(mu2, cov2, risk_free=0.0, max_w=float(req.max_weight))
+    w_pct = weights_to_pct_100(w, decimals=1)
+
+    return {
+        "weights": w.to_dict(),
+        "weights_pct": w_pct.to_dict(),
+        "mu": mu_log.to_dict(),
+        "max_weight": float(req.max_weight),
+    }
+
