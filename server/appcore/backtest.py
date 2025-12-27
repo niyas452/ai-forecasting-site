@@ -177,7 +177,7 @@ if __name__ == "__main__":
     def make_models() -> Dict[str, object]:
         return {
             "ElasticNet": ElasticNetModel(),
-            "LightGBM": LGBMQuantile(quantile=0.5),
+            "LightGBM": LGBMQuantile(verbosity=-1),
             "LSTM": LSTMModel(epochs=10),
         }
 
