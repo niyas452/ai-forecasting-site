@@ -5,18 +5,43 @@ MONTHS = {"6m": 6, "12m": 12}
 
 
 def to_monthly(prices: pd.DataFrame) -> pd.DataFrame:
-    """Convert daily prices to month-end prices."""
-    m = prices.resample("ME").last()  # 'M' deprecated in pandas 2.2+
-    return m.ffill().dropna(how="all")
+    
+    if prices is None or prices.empty:
+        return pd.DataFrame()
 
+    df = prices.copy()
+    df.index = pd.to_datetime(df.index)
+    df = df.replace([np.inf, -np.inf], np.nan)
 
+    out = {}
+    for col in df.columns:
+        s = df[col].dropna()
+        if s.empty:
+            continue
+        # resample that ticker alone
+        out[col] = s.resample("ME").last()
+
+    if not out:
+        return pd.DataFrame()
+
+    m = pd.concat(out, axis=1)
+    # keep months even if some tickers missing
+    return m.dropna(how="all")
 
 
 def log_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    """Compute monthly log returns."""
-    return np.log(prices / prices.shift(1)).dropna()
+    """
+    Compute monthly log returns per ticker (no global dropna).
+    """
+    if prices is None or prices.empty:
+        return pd.DataFrame()
+    p = prices.replace([np.inf, -np.inf], np.nan)
+    return np.log(p / p.shift(1))
 
 
 def pct_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    """Compute monthly percent returns."""
-    return prices.pct_change().dropna()
+    
+    if prices is None or prices.empty:
+        return pd.DataFrame()
+    p = prices.replace([np.inf, -np.inf], np.nan)
+    return p.pct_change()
