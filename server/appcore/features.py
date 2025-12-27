@@ -27,12 +27,16 @@ def make_monthly_features(prices: pd.DataFrame) -> pd.DataFrame:
 
     X = pd.concat(feats, axis=1)
     X.columns = [f"{f}_{t}" for f, t in X.columns]  # flatten (feature, ticker)
-    return X.dropna()
+
+    return X.replace([np.inf, -np.inf], np.nan).dropna(how="all")
 
 
 def targets(prices: pd.DataFrame, horizon: str) -> pd.DataFrame:
     m = to_monthly(prices)
     h = MONTHS[horizon]
+
     lr = np.log(m).diff()
     y = lr.shift(-h).rolling(h).sum()
-    return y.dropna()
+
+    
+    return y.replace([np.inf, -np.inf], np.nan).dropna(how="all")
