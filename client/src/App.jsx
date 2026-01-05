@@ -33,13 +33,6 @@ const indexToYM = (idx) => {
   return `${y}-${String(m).padStart(2, "0")}`;
 };
 
-/**
- * Build the exact 5 points you asked for:
- * 6m horizon:  -18m, -12m, -6m, now, forecast(+6m)
- * 12m horizon: -36m, -24m, -12m, now, forecast(+12m)
- *
- * It uses forecastItem.chart_series (monthly actual points + 1 forecast point).
- */
 const buildFivePointSeries = (forecastItem, horizon) => {
   const series = Array.isArray(forecastItem?.chart_series)
     ? forecastItem.chart_series
@@ -62,7 +55,7 @@ const buildFivePointSeries = (forecastItem, horizon) => {
   // map actual date -> price
   const actualMap = new Map(actual.map((p) => [p.date, p.price]));
 
-  // If exact month missing, pick nearest available actual month (closest by idx)
+ 
   const findNearestActualYM = (wantedIdx) => {
     let best = actual[0]?.date;
     let bestDist = Infinity;
