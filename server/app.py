@@ -1,4 +1,7 @@
 # app.py
+# Main entry point for the forecasting API.
+# Handles data fetching, model training on-the-fly, and portfolio optimization.
+
 import os
 import sys
 import json
@@ -13,7 +16,7 @@ from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-# ---------- path bootstrap ----------
+# Add appcore to path to allow direct imports
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
@@ -29,8 +32,9 @@ from appcore.optimize import max_sharpe_long_only
 from appcore.utils import to_monthly
 
 
-# ---------- caching (stops re-downloading every call) ----------
-CACHE_TTL_SECONDS = 900  # 15 minutes
+# In-memory cache for stock prices (15 min TTL).
+# Prevents spamming Yahoo Finance for repeated requests.
+CACHE_TTL_SECONDS = 900
 _PRICE_CACHE: Dict[Tuple[str, ...], tuple[float, pd.DataFrame]] = {}
 
 
@@ -46,7 +50,7 @@ def load_prices_cached(tickers: list[str], start: str = "2005-01-01") -> pd.Data
     return df
 
 
-# ---------- helpers ----------
+# Helper functions for data parsing and safety checks
 def safe_float(x) -> Optional[float]:
     if x is None:
         return None
@@ -60,11 +64,8 @@ def safe_float(x) -> Optional[float]:
 
 
 def last_price_for_ticker(prices: pd.DataFrame, t: str) -> Optional[float]:
-    """
-    ✅ IMPORTANT:
-    Use the last available price PER ticker (not prices.iloc[-1]).
-    This makes 'spot' stable even when other tickers have missing last rows.
-    """
+    # Returns last non-NaN price for a specific ticker.
+    # Essential because tickers may have different trading days/delisting dates.
     if prices is None or prices.empty or t not in prices.columns:
         return None
     s = prices[t].replace([np.inf, -np.inf], np.nan).dropna()
@@ -72,10 +73,7 @@ def last_price_for_ticker(prices: pd.DataFrame, t: str) -> Optional[float]:
 
 
 def parse_tickers(raw: str) -> list[str]:
-    """
-    Accepts either 'AAPL,MSFT,SPY' or '["AAPL","MSFT","SPY"]'
-    and returns ['AAPL','MSFT','SPY'].
-    """
+    
     cleaned = raw.strip()
     try:
         obj = json.loads(cleaned)
@@ -100,9 +98,8 @@ def parse_tickers(raw: str) -> list[str]:
 
 
 def weights_to_pct_100(w: pd.Series, decimals: int = 1) -> pd.Series:
-    """
-    Convert weights (sum ~1) to % labels that sum to exactly 100.0 after rounding.
-    """
+    # Forces weights to sum to exactly 100.0% by adjusting the largest remainder.
+    # avoids "99.9%" display issues.
     if w is None or w.empty:
         return pd.Series(dtype=float)
 
@@ -121,13 +118,8 @@ def make_chart_series(
     horizon: str,
     forecast_price: Optional[float],
 ) -> list[dict]:
-    """
-    6m: show last 18 months (3x6m) + current + forecast point at +6m
-    12m: show last 36 months (3y) + current + forecast point at +12m
-
-    Returns list of:
-      {"date":"YYYY-MM", "price": float, "kind": "actual"|"forecast"}
-    """
+    # Prepares data for 5-point path charts (History + Current + Forecast).
+    # 6m horizon = 18m history; 12m horizon = 36m history.
     m = to_monthly(prices)
     if ticker not in m.columns:
         return []
@@ -157,7 +149,7 @@ def make_chart_series(
     return pts
 
 
-# ---------- API models ----------
+# Pydantic models for request/response validation
 class ChartPoint(BaseModel):
     date: str
     price: float
@@ -181,7 +173,7 @@ class OptimizeRequest(BaseModel):
     max_weight: float = 0.60
 
 
-# ---------- app ----------
+# FastAPI Application setup
 app = FastAPI(title="AI Ensemble Forecasting API", version="0.6.2")
 
 app.add_middleware(
@@ -198,7 +190,7 @@ def root():
     return {"status": "ok", "endpoints": ["/forecast", "/optimize", "/docs"]}
 
 
-# ---------- model fitting ----------
+# Model training and inference logic
 def fit_models_for_forecast(X: pd.DataFrame, y: pd.DataFrame):
     enet = ElasticNetModel().fit(X, y)
 
@@ -222,7 +214,7 @@ def fit_models_for_forecast(X: pd.DataFrame, y: pd.DataFrame):
     return enet, qgbm, ens
 
 
-# ---------- endpoints ----------
+# API Endpoints
 @app.get("/forecast")
 def forecast(
     tickers: str = Query(..., description="Comma-separated tickers or JSON list"),
@@ -260,7 +252,7 @@ def forecast(
 
     out: list[dict] = []
     for t in tickers_list:
-        # ✅ stable spot per ticker
+        # Get spot price safely
         spot_val = last_price_for_ticker(prices, t)
 
         p50_val = safe_float(p50_series.get(t))
@@ -329,4 +321,3 @@ def optimize(req: OptimizeRequest):
         "mu": mu_log.to_dict(),
         "max_weight": float(req.max_weight),
     }
-
