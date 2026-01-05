@@ -10,11 +10,7 @@ except Exception:
 
 
 def max_sharpe_unconstrained(mu: pd.Series, cov: pd.DataFrame, risk_free: float = 0.0) -> pd.Series:
-    """
-    Classic unconstrained tangency portfolio:
-      w ∝ Σ^{-1}(μ - r_f), normalized so sum(w)=1
-    Can produce negative weights (shorting).
-    """
+   
     tickers = list(mu.index)
     mu_vec = mu.values.reshape(-1, 1).astype(float)
     inv_cov = np.linalg.pinv(cov.values.astype(float))
@@ -39,7 +35,7 @@ def _normalize_simplex_with_cap(w: pd.Series, max_w: float = 1.0) -> pd.Series:
     if s <= 1e-12:
         return pd.Series(1.0 / len(w2), index=w2.index)
     w2 = w2 / s
-    # cap can be violated after renorm; apply one more pass
+   
     w2 = w2.clip(lower=0.0, upper=float(max_w))
     s2 = float(w2.sum())
     return (w2 / s2) if s2 > 1e-12 else pd.Series(1.0 / len(w2), index=w2.index)
@@ -67,7 +63,7 @@ def max_sharpe_long_only(
     cov_mat = cov.values.astype(float)
     n = len(tickers)
 
-    # SciPy constrained solve (recommended)
+   
     if _HAS_SCIPY:
         def neg_sharpe(w):
             w = np.asarray(w, dtype=float)
