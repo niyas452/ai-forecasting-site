@@ -1,16 +1,19 @@
+# data.py
+# Handles downloading market data from Yahoo Finance.
+# Manages multi-index columns and data alignment.
+
 import time
 import pandas as pd
 import yfinance as yf
 
 
 def _extract_close_series(df: pd.DataFrame, ticker: str) -> pd.Series | None:
-    """
-    Handle both old and new yfinance formats and return a 1D Close price Series.
-    """
+    # Extracts the 'Close' (or 'Adj Close') column for a given ticker.
+    # Handles changes in yfinance return formats (MultiIndex vs Flat).
     if df is None or df.empty:
         return None
 
-    # New yfinance: MultiIndex columns
+    # Detect and parse MultiIndex columns (common in newer yfinance versions)
     if isinstance(df.columns, pd.MultiIndex):
         # We need to find which level contains 'Close' or 'Adj Close'
         # in yfinance 1.0+, Level 0 is often 'Price' (Close, Open, etc)
@@ -32,10 +35,6 @@ def _extract_close_series(df: pd.DataFrame, ticker: str) -> pd.Series | None:
         elif df.columns.nlevels > 1 and "Adj Close" in df.columns.get_level_values(1):
             close = df.xs("Adj Close", axis=1, level=1)
         else:
-             # Just take the first column's group? Risky.
-             # Let's try to grab the first column of the df if nothing matches (fallback)
-             # But we need a Series.
-             # Let's just return None if we can't find Close.
              return None
 
         if isinstance(close, pd.DataFrame):
@@ -53,7 +52,7 @@ def _extract_close_series(df: pd.DataFrame, ticker: str) -> pd.Series | None:
         s.name = ticker
         return s.dropna()
 
-    # Old yfinance: flat columns like 'Adj Close', 'Close'
+    # Fallback for flat columns (older versions)
     for col in ["Adj Close", "Close", "close", "adj_close"]:
         if col in df.columns:
             s = df[col].astype(float)
@@ -64,7 +63,7 @@ def _extract_close_series(df: pd.DataFrame, ticker: str) -> pd.Series | None:
 
 
 def _download_one(ticker: str, start: str = "2005-01-01") -> pd.Series | None:
-    """Download a single ticker robustly; return its Close as a Series or None."""
+    # Retries download up to 3 times to handle network blips.
     for _ in range(3):
         try:
             df = yf.download(
@@ -89,7 +88,8 @@ def _download_one(ticker: str, start: str = "2005-01-01") -> pd.Series | None:
 
 
 def load_prices(tickers, start: str = "2005-01-01") -> pd.DataFrame:
-    
+    # Downloads multiple tickers and aligns them on a common date index.
+    # Uses outer join to strictly preserve missing data as NaNs (no fill).
     if isinstance(tickers, str):
         tickers = [tickers]
 
@@ -118,3 +118,4 @@ def load_prices(tickers, start: str = "2005-01-01") -> pd.DataFrame:
     out = out.dropna(how="all")
 
     return out
+
