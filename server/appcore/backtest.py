@@ -1,14 +1,13 @@
+# backtest.py
+# Walk-forward validation engine.
+# Computes out-of-sample metrics (MAE, RMSE, MASE).
+
 import numpy as np
 import pandas as pd
 from typing import Callable, Dict, Tuple
 
 from appcore.utils import to_monthly
 from appcore.features import make_monthly_features, targets
-
-
-# =========================================================
-# Error metrics
-# =========================================================
 
 def mase(
     y_true: pd.Series,
@@ -37,7 +36,8 @@ def directional_accuracy(
     actuals_df: pd.DataFrame,
 ) -> pd.Series:
     """
-    Compute directional accuracy per ticker.
+    Compute directional accuracy from aligned predictions and actuals.
+    Returns % of months direction was correctly predicted.
     """
     preds_df, actuals_df = preds_df.align(actuals_df, join="inner", axis=0)
     preds_df, actuals_df = preds_df.align(actuals_df, join="inner", axis=1)
@@ -53,9 +53,7 @@ def directional_accuracy(
     return pd.Series(da, name="DA")
 
 
-# =========================================================
-# Walk-forward backtesting
-# =========================================================
+# Walk-forward logic
 
 def walk_forward(
     prices: pd.DataFrame,
@@ -119,9 +117,7 @@ def walk_forward(
     return preds_df, actuals_df
 
 
-# =========================================================
-# Metrics computation
-# =========================================================
+# Metrics Aggregation
 
 def compute_backtest_metrics(
     preds_df: pd.DataFrame,
@@ -164,9 +160,7 @@ def compute_backtest_metrics(
     return metrics
 
 
-# =========================================================
-# Run as script
-# =========================================================
+# Script Entry point
 
 if __name__ == "__main__":
     from appcore.data import load_prices
@@ -181,7 +175,7 @@ if __name__ == "__main__":
             "LSTM": LSTMModel(epochs=10),
         }
 
-    tickers = ["AAPL", "MSFT", "SPY"]
+    tickers = ["GOOGL", "MSFT", "SPY"]
     print(f"Downloading prices for {tickers} ...")
     prices = load_prices(tickers)
 
