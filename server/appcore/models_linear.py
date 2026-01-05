@@ -12,11 +12,6 @@ def _slice_X_for_ticker(X: pd.DataFrame, ticker: str) -> pd.DataFrame:
 
 
 class ElasticNetModel:
-    """
-    Per-ticker ElasticNet (stable):
-    - trains one ElasticNet per ticker using only that ticker's feature columns
-    - drops NaN rows per ticker (so adding other tickers doesn't break or change dates globally)
-    """
 
     def __init__(self, alpha=0.5, l1_ratio=0.5, random_state=42):
         self.alpha = alpha
