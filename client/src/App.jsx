@@ -21,7 +21,7 @@ const API_BASE = "http://127.0.0.1:8000";
 
 const COLORS = ["#6366f1", "#22c55e", "#f97316", "#ec4899", "#06b6d4"];
 
-/** --- date helpers: YYYY-MM arithmetic --- */
+// Helper to map YYYY-MM strings to linear indices
 const ymToIndex = (ym) => {
   const [y, m] = ym.split("-").map(Number);
   return y * 12 + (m - 1);
@@ -33,6 +33,8 @@ const indexToYM = (idx) => {
   return `${y}-${String(m).padStart(2, "0")}`;
 };
 
+// Generates the 5-point visual path: History -> Spot -> Forecast.
+// Used for the sparkline-style charts.
 const buildFivePointSeries = (forecastItem, horizon) => {
   const series = Array.isArray(forecastItem?.chart_series)
     ? forecastItem.chart_series
@@ -55,7 +57,7 @@ const buildFivePointSeries = (forecastItem, horizon) => {
   // map actual date -> price
   const actualMap = new Map(actual.map((p) => [p.date, p.price]));
 
- 
+  // If exact month missing, pick nearest available actual month (closest by idx)
   const findNearestActualYM = (wantedIdx) => {
     let best = actual[0]?.date;
     let bestDist = Infinity;
@@ -101,7 +103,7 @@ const buildFivePointSeries = (forecastItem, horizon) => {
   return unique;
 };
 
-// ✅ Updated: treat null/NaN and 0/-0 as "N/A" for intervals
+// Formatter for table values (handles null/zero robustness)
 const fmtInterval = (v) => {
   if (v === null || v === undefined) return "N/A";
   const n = Number(v);
@@ -111,7 +113,7 @@ const fmtInterval = (v) => {
 };
 
 function App() {
-  const [tickersInput, setTickersInput] = useState("AAPL,MSFT,SPY");
+  const [tickersInput, setTickersInput] = useState("");
   const [horizon, setHorizon] = useState("6m");
 
   const [forecastLoading, setForecastLoading] = useState(false);
@@ -130,7 +132,7 @@ function App() {
       .map((t) => t.trim().toUpperCase())
       .filter(Boolean);
 
-  // --------- API handlers ---------
+  // API Interaction
 
   const handleForecast = async () => {
     setForecastError("");
@@ -158,7 +160,7 @@ function App() {
       console.error(err);
       setForecastError(
         err?.response?.data?.detail ||
-          "Forecast request failed. Check backend logs or try different tickers."
+        "Forecast request failed. Check backend logs or try different tickers."
       );
     } finally {
       setForecastLoading(false);
@@ -188,14 +190,14 @@ function App() {
       console.error(err);
       setOptError(
         err?.response?.data?.detail ||
-          "Optimization failed. Check backend logs or try different tickers."
+        "Optimization failed. Check backend logs or try different tickers."
       );
     } finally {
       setOptLoading(false);
     }
   };
 
-  // --------- derived data for charts ---------
+  // Data Transformation
 
   const forecastChartData = forecasts.map((f) => ({
     ticker: f.ticker,
@@ -218,25 +220,25 @@ function App() {
       mu: mu && mu[ticker] != null ? mu[ticker] : null,
     }));
 
-  // ✅ NEW: five-point line series for each ticker
+  // Map raw forecasts to charting structures
   const fivePointSeriesByTicker = forecasts.map((f) => ({
     ticker: f.ticker,
     series: buildFivePointSeries(f, horizon),
   }));
 
-  // ✅ Updated dot: NO forecast dot here (ReferenceDot will draw it)
+  // Custom renderer to selectively hide/show points on the line chart
   const CustomDot = (props) => {
     const { cx, cy, payload } = props;
     if (!payload) return null;
 
-    // ❌ don't draw forecast dot on the line (prevents the extra top-corner red dot)
+    // Skip forecast point (drawn separately)
     if (payload.kind === "forecast") return null;
 
     // blue dot for actual points
     return <circle cx={cx} cy={cy} r={3} fill="#38bdf8" />;
   };
 
-  // --------- UI ---------
+  // Render Logic
 
   return (
     <div
@@ -259,7 +261,7 @@ function App() {
           gap: "20px",
         }}
       >
-        {/* HEADER */}
+        {/* Header */}
         <header
           style={{
             display: "flex",
@@ -269,25 +271,23 @@ function App() {
           }}
         >
           <div>
-            <h1 style={{ fontSize: "30px", fontWeight: 700 }}>
+            <h1 style={{ fontSize: "42px", fontWeight: 700 }}>
               AI Portfolio Forecasting
             </h1>
             <p
               style={{
-                color: "#9ca3af",
+                color: "#cbd5e1",
                 marginTop: "4px",
-                maxWidth: "640px",
-                fontSize: "14px",
+                maxWidth: "700px",
+                fontSize: "18px",
               }}
             >
-              Ensemble of ElasticNet, LightGBM and LSTM with Modern Portfolio
-              Theory and Yahoo Finance data. Forecast 6–12 months ahead and
-              optimize portfolio weights.
+              AI-Powered Ensemble Forecasting & Portfolio Optimization (6–12m).
             </p>
           </div>
         </header>
 
-        {/* INPUT CARD */}
+        {/* Configuration Panel */}
         <section
           style={{
             background:
@@ -303,7 +303,7 @@ function App() {
         >
           {/* Tickers + Horizon */}
           <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
-            <label style={{ fontSize: "13px", color: "#9ca3af" }}>Tickers</label>
+            <label style={{ fontSize: "18px", color: "#e5e7eb", fontWeight: 600 }}>Tickers</label>
             <input
               value={tickersInput}
               onChange={(e) => setTickersInput(e.target.value)}
@@ -314,12 +314,12 @@ function App() {
                 border: "1px solid #1f2937",
                 background:
                   "linear-gradient(135deg, rgba(15,23,42,0.6), rgba(15,23,42,0.9))",
-                color: "#e5e7eb",
+                color: "#ffffff",
                 outline: "none",
-                fontSize: "14px",
+                fontSize: "18px",
               }}
             />
-            <span style={{ fontSize: "12px", color: "#6b7280" }}>
+            <span style={{ fontSize: "15px", color: "#cbd5e1" }}>
               Use comma-separated ticker symbols (US stocks / ETFs from Yahoo
               Finance).
             </span>
@@ -340,7 +340,7 @@ function App() {
                   gap: "4px",
                 }}
               >
-                <label style={{ fontSize: "13px", color: "#9ca3af" }}>
+                <label style={{ fontSize: "18px", color: "#e5e7eb", fontWeight: 600 }}>
                   Forecast Horizon
                 </label>
                 <select
@@ -352,8 +352,8 @@ function App() {
                     border: "1px solid #1f2937",
                     background:
                       "linear-gradient(135deg, rgba(15,23,42,0.7), rgba(15,23,42,0.95))",
-                    color: "#e5e7eb",
-                    fontSize: "14px",
+                    color: "#ffffff",
+                    fontSize: "18px",
                   }}
                 >
                   <option value="6m">6 months</option>
@@ -362,14 +362,13 @@ function App() {
               </div>
               <div
                 style={{
-                  fontSize: "12px",
-                  color: "#6b7280",
+                  fontSize: "15px",
+                  color: "#cbd5e1",
                   maxWidth: "280px",
-                  lineHeight: 1.4,
+                  lineHeight: 1.5,
                 }}
               >
-                Median ensemble forecast over the selected horizon. Intervals
-                (p10/p90) are experimental and may be N/A when data is limited.
+                Median forecast. Intervals (p10/p90) are experimental.
               </div>
             </div>
           </div>
@@ -401,7 +400,7 @@ function App() {
                   color: "white",
                   fontWeight: 600,
                   cursor: "pointer",
-                  fontSize: "14px",
+                  fontSize: "16px",
                   opacity: forecastLoading ? 0.7 : 1,
                   boxShadow: "0 10px 30px rgba(34,197,94,0.35)",
                 }}
@@ -421,7 +420,7 @@ function App() {
                   color: "#e5e7eb",
                   fontWeight: 500,
                   cursor: "pointer",
-                  fontSize: "14px",
+                  fontSize: "16px",
                   opacity: optLoading ? 0.7 : 1,
                 }}
               >
@@ -438,7 +437,7 @@ function App() {
                   background:
                     "linear-gradient(135deg, rgba(127,29,29,0.2), rgba(127,29,29,0.4))",
                   border: "1px solid #b91c1c",
-                  fontSize: "12px",
+                  fontSize: "14px",
                   color: "#fee2e2",
                 }}
               >
@@ -447,22 +446,11 @@ function App() {
               </div>
             )}
 
-            <div
-              style={{
-                fontSize: "11px",
-                color: "#6b7280",
-                marginTop: "auto",
-                borderTop: "1px dashed #1f2937",
-                paddingTop: "8px",
-              }}
-            >
-              Backend: FastAPI · Models: ElasticNet, LightGBM, LSTM · Optimization:
-              max Sharpe using Ledoit–Wolf covariance.
-            </div>
+
           </div>
         </section>
 
-        {/* MAIN GRID: Forecasts + Charts */}
+        {/* Results Dashboard */}
         <section
           style={{
             display: "grid",
@@ -470,7 +458,7 @@ function App() {
             gap: "18px",
           }}
         >
-          {/* Forecast table */}
+          {/* Tabular Data */}
           <div
             style={{
               background: "rgba(15,23,42,0.95)",
@@ -487,14 +475,14 @@ function App() {
                 marginBottom: "8px",
               }}
             >
-              <h2 style={{ fontSize: "16px", fontWeight: 600 }}>Forecasts</h2>
-              <span style={{ fontSize: "11px", color: "#9ca3af" }}>
+              <h2 style={{ fontSize: "18px", fontWeight: 600 }}>Forecasts</h2>
+              <span style={{ fontSize: "16px", color: "#cbd5e1" }}>
                 Prices plus log-returns over the selected horizon.
               </span>
             </div>
 
             {forecasts.length === 0 ? (
-              <p style={{ fontSize: "13px", color: "#6b7280", marginTop: "4px" }}>
+              <p style={{ fontSize: "15px", color: "#bdc6d4", marginTop: "4px" }}>
                 Run a forecast to see model outputs for each ticker.
               </p>
             ) : (
@@ -502,7 +490,7 @@ function App() {
                 style={{
                   width: "100%",
                   borderCollapse: "collapse",
-                  fontSize: "13px",
+                  fontSize: "17px",
                   marginTop: "6px",
                 }}
               >
@@ -510,7 +498,7 @@ function App() {
                   <tr
                     style={{
                       borderBottom: "1px solid #1f2937",
-                      color: "#9ca3af",
+                      color: "#e5e7eb",
                     }}
                   >
                     <th style={{ textAlign: "left", padding: "6px 4px" }}>
@@ -569,7 +557,7 @@ function App() {
                       <td style={{ padding: "6px 4px", textAlign: "right" }}>
                         {f.p50 != null ? f.p50.toFixed(4) : "—"}
                       </td>
-                      {/* ✅ Updated formatting for XAU zeros */}
+                      {/* Formatting for zero values */}
                       <td
                         style={{
                           padding: "6px 4px",
@@ -595,7 +583,7 @@ function App() {
             )}
           </div>
 
-          {/* Visuals card (ONLY bar chart now) */}
+          {/* Summary Charts */}
           <div
             style={{
               background: "rgba(15,23,42,0.95)",
@@ -607,20 +595,20 @@ function App() {
               gap: "14px",
             }}
           >
-            <h2 style={{ fontSize: "16px", fontWeight: 600 }}>Visuals</h2>
+            <h2 style={{ fontSize: "18px", fontWeight: 600 }}>Visuals</h2>
 
             <div style={{ height: "260px" }}>
               <p
                 style={{
-                  fontSize: "12px",
-                  color: "#9ca3af",
+                  fontSize: "16px",
+                  color: "#cbd5e1",
                   marginBottom: "4px",
                 }}
               >
                 Expected price vs current price
               </p>
               {forecastChartData.length === 0 ? (
-                <p style={{ fontSize: "12px", color: "#6b7280" }}>
+                <p style={{ fontSize: "16px", color: "#9ca3af" }}>
                   Run forecast to populate this chart.
                 </p>
               ) : (
@@ -628,10 +616,10 @@ function App() {
                   <BarChart data={forecastChartData} barGap={4}>
                     <XAxis
                       dataKey="ticker"
-                      tick={{ fill: "#9ca3af", fontSize: 11 }}
+                      tick={{ fill: "#e5e7eb", fontSize: 15 }}
                     />
                     <YAxis
-                      tick={{ fill: "#9ca3af", fontSize: 11 }}
+                      tick={{ fill: "#e5e7eb", fontSize: 15 }}
                       tickFormatter={(v) => v.toFixed(0)}
                     />
                     <Tooltip
@@ -639,14 +627,14 @@ function App() {
                         background: "#020617",
                         border: "1px solid #374151",
                         borderRadius: "10px",
-                        fontSize: "12px",
+                        fontSize: "16px",
                       }}
                       formatter={(value) => [
                         value?.toFixed ? value.toFixed(2) : value,
                       ]}
                     />
                     <Legend
-                      wrapperStyle={{ fontSize: "11px", color: "#e5e7eb" }}
+                      wrapperStyle={{ fontSize: "15px", color: "#e5e7eb" }}
                     />
                     <Bar dataKey="spot" name="Current price" fill="#38bdf8" />
                     <Bar
@@ -661,7 +649,7 @@ function App() {
           </div>
         </section>
 
-        {/* ✅ NEW SECTION: 5-point line charts for EVERY ticker (before portfolio) */}
+        {/* Detailed Price Paths */}
         <section
           style={{
             marginTop: "4px",
@@ -672,10 +660,10 @@ function App() {
             backdropFilter: "blur(6px)",
           }}
         >
-          <h2 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "10px" }}>
+          <h2 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "10px" }}>
             Price Path (5 points)
           </h2>
-          <p style={{ fontSize: "12px", color: "#9ca3af", marginBottom: "14px" }}>
+          <p style={{ fontSize: "16px", color: "#cbd5e1", marginBottom: "14px" }}>
             {horizon === "6m"
               ? "Points are spaced by 6 months (past 18m → now → forecast)."
               : "Points are spaced by 12 months (past 36m → now → forecast)."}{" "}
@@ -730,14 +718,14 @@ function App() {
                       }}
                     >
                       <div style={{ fontWeight: 700 }}>{ticker}</div>
-                      <div style={{ fontSize: "12px", color: "#9ca3af" }}>
+                      <div style={{ fontSize: "15px", color: "#9ca3af" }}>
                         {horizon}
                       </div>
                     </div>
 
                     <div style={{ height: "220px" }}>
                       {series.length === 0 ? (
-                        <p style={{ fontSize: "12px", color: "#6b7280" }}>
+                        <p style={{ fontSize: "15px", color: "#6b7280" }}>
                           No chart data available.
                         </p>
                       ) : (
@@ -746,10 +734,10 @@ function App() {
                             <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
                             <XAxis
                               dataKey="date"
-                              tick={{ fill: "#9ca3af", fontSize: 11 }}
+                              tick={{ fill: "#e5e7eb", fontSize: 15 }}
                             />
                             <YAxis
-                              tick={{ fill: "#9ca3af", fontSize: 11 }}
+                              tick={{ fill: "#e5e7eb", fontSize: 15 }}
                               tickFormatter={(v) => Number(v).toFixed(0)}
                               domain={["auto", "auto"]}
                             />
@@ -758,7 +746,7 @@ function App() {
                                 background: "#020617",
                                 border: "1px solid #374151",
                                 borderRadius: "10px",
-                                fontSize: "12px",
+                                fontSize: "16px",
                               }}
                               formatter={(value, name, props) => {
                                 const kind = props?.payload?.kind;
@@ -768,7 +756,7 @@ function App() {
                               }}
                             />
 
-                            {/* Blue history with dots only for actual */}
+                            {/* Historical trajectory */}
                             <Line
                               type="monotone"
                               dataKey="actual"
@@ -778,7 +766,7 @@ function App() {
                               activeDot={{ r: 5 }}
                             />
 
-                            {/* Green connector current -> forecast */}
+                            {/* Forecast projection */}
                             <Line
                               type="monotone"
                               dataKey="connector"
@@ -788,7 +776,7 @@ function App() {
                               activeDot={false}
                             />
 
-                            {/* ✅ Keep forecast dot at expected point */}
+                            {/* Terminal forecast point */}
                             {forecastPoint && (
                               <ReferenceDot
                                 x={forecastPoint.date}
@@ -822,7 +810,7 @@ function App() {
             backdropFilter: "blur(6px)",
           }}
         >
-          <h2 style={{ fontSize: "16px", fontWeight: 600, marginBottom: "10px" }}>
+          <h2 style={{ fontSize: "18px", fontWeight: 600, marginBottom: "10px" }}>
             Portfolio Weights & Breakdown
           </h2>
 
@@ -837,7 +825,7 @@ function App() {
             {/* Pie chart */}
             <div style={{ height: "260px" }}>
               {!weightsChartData ? (
-                <p style={{ fontSize: "13px", color: "#6b7280" }}>
+                <p style={{ fontSize: "16px", color: "#cbd5e1" }}>
                   Click &quot;Optimize Portfolio&quot; to see the optimal allocation.
                 </p>
               ) : (
@@ -869,7 +857,7 @@ function App() {
             {/* Weights table */}
             <div>
               {!weightsTableData ? (
-                <p style={{ fontSize: "13px", color: "#6b7280" }}>
+                <p style={{ fontSize: "16px", color: "#cbd5e1" }}>
                   Run optimization to populate the weights table.
                 </p>
               ) : (
@@ -877,14 +865,14 @@ function App() {
                   style={{
                     width: "100%",
                     borderCollapse: "collapse",
-                    fontSize: "13px",
+                    fontSize: "16px",
                     background: "rgba(15,23,42,0.9)",
                     borderRadius: "12px",
                     overflow: "hidden",
                   }}
                 >
                   <thead style={{ background: "rgba(15,23,42,0.95)" }}>
-                    <tr style={{ color: "#d1d5db" }}>
+                    <tr style={{ color: "#f3f4f6" }}>
                       <th style={{ textAlign: "left", padding: "8px" }}>Ticker</th>
                       <th style={{ textAlign: "right", padding: "8px" }}>Weight</th>
                       <th style={{ textAlign: "right", padding: "8px" }}>μ (log)</th>
@@ -922,4 +910,5 @@ function App() {
 }
 
 export default App;
+
 
