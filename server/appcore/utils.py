@@ -18,21 +18,18 @@ def to_monthly(prices: pd.DataFrame) -> pd.DataFrame:
         s = df[col].dropna()
         if s.empty:
             continue
-        # resample that ticker alone
+       
         out[col] = s.resample("ME").last()
 
     if not out:
         return pd.DataFrame()
 
     m = pd.concat(out, axis=1)
-    # keep months even if some tickers missing
     return m.dropna(how="all")
 
 
 def log_returns(prices: pd.DataFrame) -> pd.DataFrame:
-    """
-    Compute monthly log returns per ticker (no global dropna).
-    """
+   
     if prices is None or prices.empty:
         return pd.DataFrame()
     p = prices.replace([np.inf, -np.inf], np.nan)
