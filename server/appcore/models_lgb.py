@@ -1,9 +1,14 @@
+# models_lgb.py
+# LightGBM wrapper for Quantile Regression (p10, p50, p90).
+# Used to estimate uncertainty intervals.
+
 import numpy as np
 import pandas as pd
 import lightgbm as lgb
 
 
 def _slice_X_for_ticker(X: pd.DataFrame, ticker: str) -> pd.DataFrame:
+    # Extract columns specific to one ticker (e.g., "RSI_AAPL").
     suffix = f"_{ticker}"
     cols = [c for c in X.columns if c.endswith(suffix)]
     return X[cols].copy()
@@ -41,10 +46,8 @@ class LGBMQuantile:
 
     @staticmethod
     def _clean_join(Xt: pd.DataFrame, yt: pd.Series) -> tuple[pd.DataFrame, pd.Series]:
-        """
-        Join X and y and drop invalid rows per ticker.
-        LightGBM can handle NaN, but we still remove infs and fully-missing rows.
-        """
+        # Aligns inputs/targets and drops missing rows.
+        # Strict dropna required because LGBM handling of NaNs can be unpredictable in small samples.
         df = Xt.join(yt.rename("y"), how="inner")
         df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["y"])
         Xt2 = df.drop(columns=["y"])
@@ -68,7 +71,7 @@ class LGBMQuantile:
 
             Xt, yt = self._clean_join(Xt, yt)
 
-            # Minimum samples to train something meaningful
+            # Skip if history is too short for stable boosting.
             if len(Xt) < 60:
                 continue
 
@@ -118,4 +121,4 @@ class LGBMQuantile:
     def predict(self, X: pd.DataFrame) -> pd.Series:
         _, p50, _ = self.predict_quantiles(X)
         return p50
-)
+
