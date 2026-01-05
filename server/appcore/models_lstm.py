@@ -1,3 +1,7 @@
+# models_lstm.py
+# PyTorch LSTM implementation for sequence-based forecasting.
+# Enforces determinism for reproducible research results.
+
 import os
 import random
 import zlib
@@ -92,7 +96,7 @@ class LSTMModel:
         self.scalers.clear()
 
         for t in self.tickers:
-            # ✅ reseed per ticker so training order / other tickers don't affect this ticker
+            # Seed isolation per ticker prevents cross-contamination of randomness.
             t_seed = self._seed_for_ticker(t)
             self._reseed_all(t_seed)
 
@@ -122,7 +126,7 @@ class LSTMModel:
 
             ds = TensorDataset(torch.tensor(X_seq), torch.tensor(y_seq))
 
-            # ✅ generator seeded per ticker (shuffle reproducible per ticker)
+            # Use a localized generator for data shuffling.
             g = torch.Generator()
             g.manual_seed(t_seed)
 
@@ -188,4 +192,3 @@ class LSTMModel:
                 out[t] = float(model(xb).item())
 
         return pd.Series(out)
-
