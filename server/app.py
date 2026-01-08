@@ -295,11 +295,9 @@ def optimize(req: OptimizeRequest):
         y = targets(prices, req.horizon)
     except Exception as e:
         raise HTTPException(502, f"Data error while building features: {e}")
-
-    # FAST μ for optimization
-    enet = ElasticNetModel().fit(X, y)
-    mu_log = enet.predict(X).reindex(tickers_list)
-
+    # Expected Retrun for optimization
+    enet, qgbm, ens = fit_models_for_forecast(X, y)
+    mu_log = ens.predict(X)
     # Ledoit–Wolf covariance on historical LOG returns
     m = to_monthly(prices)
     rets_log = np.log(m / m.shift(1)).dropna(how="any")
